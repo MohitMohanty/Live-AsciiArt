@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0a0a0a;color:#00ff41;font-family:'Courier New',monospace;display:flex;flex-direction:column;height:100vh;overflow:hidden;}
+header{padding:8px 16px;display:flex;align-items:center;gap:12px;background:#111;border-bottom:1px solid #00ff4130;flex-shrink:0;flex-wrap:wrap;}
+h1{font-size:.95rem;letter-spacing:4px;}
+.dot{width:8px;height:8px;border-radius:50%;background:#555;animation:blink 1s infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+.lbl{font-size:.68rem;letter-spacing:2px;color:#555;}
+.lbl.on{color:#ff3b3b;}
+.ctrl{display:flex;gap:10px;align-items:center;margin-left:auto;flex-wrap:wrap;}
+lab{font-size:.68rem;color:#777;letter-spacing:1px;}
+select{background:#1a1a1a;color:#00ff41;border:1px solid #00ff4140;padding:3px 6px;border-radius:3px;font-family:monospace;font-size:.76rem;cursor:pointer;}
+input[type=range]{cursor:pointer;accent-color:#00ff41;width:70px;}
+.fps{font-size:.68rem;color:#555;min-width:52px;}
+#glCanvas{display:block;width:100%;height:100%;}
+#wrap{flex:1;overflow:hidden;}
+canvas,video{display:none;}
+#glCanvas{display:block;}
+.ov{position:fixed;inset:0;background:#0a0a0af5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;z-index:100;}
+.ov h2{font-size:1.8rem;letter-spacing:8px;}
+.ov p{color:#555;font-size:.8rem;letter-spacing:2px;}
+.ov small{color:#333;font-size:.7rem;max-width:300px;text-align:center;line-height:1.7;}
+.ov .gpu{color:#00ff4188;font-size:.7rem;letter-spacing:1px;}
+btn,button{background:transparent;border:1px solid #00ff41;color:#00ff41;padding:11px 34px;font-family:monospace;font-size:.92rem;letter-spacing:3px;cursor:pointer;text-transform:uppercase;transition:all .2s;}
+button:hover{background:#00ff4112;box-shadow:0 0 20px #00ff4150;}
+.cb{padding:3px 9px;font-size:.7rem;letter-spacing:1px;border-color:#2a2a2a;color:#555;}
+.cb.a{border-color:#00ff41;color:#00ff41;}
+</style>
+</head>
+<body>
+<div class="ov" id="ov">
+  <h2>ASCII CAM</h2>
+  <p>GPU-accelerated via WebGL shaders</p>
+  <button onclick="startCamera()">▶ ENABLE CAMERA</button>
+  <span class="gpu">⚡ WEBGL · FRAGMENT SHADER RENDERING</span>
+  <small>Camera feed never leaves your device. Rendered entirely on your GPU.</small>
+</div>
+<header>
+  <div class="dot" id="dot"></div>
+  <span class="lbl" id="lbl">OFFLINE</span>
+  <h1>ASCII CAM </h1>
+  <div class="ctrl">
+    <lab>CHARSET</lab>
+    <select id="csel" onchange="onCharsetChange(this.value)">
+      <option value="detailed">Detailed</option>
+      <option value="alphanum">Alphanumeric</option>
+      <option value="blocks">Blocks</option>
+      <option value="symbols">Symbols</option>
+      <option value="binary">Binary</option>
+      <option value="matrix">Matrix</option>
+    </select>
+    <lab>COLOR</lab>
+    <button class="cb a" id="b_green" onclick="setMono([0,1,.25])">GREEN</button>
+    <button class="cb" id="b_white" onclick="setMono([.87,.87,.87])">WHITE</button>
+    <button class="cb" id="b_amber" onclick="setMono([1,.67,0])">AMBER</button>
+    <button class="cb" id="b_color" onclick="setColorMode()">COLOR</button>
+    <lab>SIZE</lab>
+    <input type="range" id="sz" min="5" max="18" value="9" oninput="setCellSize(+this.value)">
+    <span class="fps" id="fps">-- FPS</span>
+  </div>
+</header>
+<div id="wrap"><canvas id="glCanvas"></canvas></div>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="atlasCanvas"></canvas>
+
+<script>
+const SETS={
+  detailed: '$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/|()1{}[]?-_+~<>i!lI;:,". ',
+  alphanum: 'WMABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz@#$%!?. ',
+  blocks:   '█▓▒░▐▌▄▀■●◆★▲ ',
+  symbols:  '@#$%&*!?+=-~^<>|/\\(){}[]0123456789.:, ',
+  binary:   '10 ',
+  matrix:   'ｦｧｨｩｪｫｬｭｮｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂ0123456789 '
+};
+
+// ── State ───────────────────────────────────────────────────────────
+let charset = SETS.detailed;
+let monoColor = [0, 1.0, 0.25];
+let colorMode = false;   // true = use video RGB
+let cellW = 9, cellH = 16;
+let running = false, fc=0, lastT=0;
+
+// ── DOM refs ─────────────────────────────────────────────────────────
+const video       = document.getElementById('video');
+const glCanvas    = document.getElementById('glCanvas');
+const atlasCanvas = document.getElementById('atlasCanvas');
+
+// ── WebGL setup ──────────────────────────────────────────────────────
+const gl = glCanvas.getContext('webgl', {antialias:false, alpha:false, powerPreference:'high-performance'});
+if (!gl) alert('WebGL not supported');
+
+// Vertex shader — draws a full-screen quad
+const VS = `
+attribute vec2 aPos;
+varying vec2 vUV;
+void main(){
+  vUV = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+// Fragment shader — GPU does ALL the work
+const FS = `
+precision mediump float;
+varying vec2 vUV;
+
+uniform sampler2D uVideo;
+uniform sampler2D uAtlas;
+uniform vec2  uResolution;   // canvas px
+uniform vec2  uCellSize;     // cell px
+uniform float uCharCount;    // chars in charset
+uniform vec3  uMonoColor;
+uniform float uColorMode;    // 0=mono 1=color
+
+void main(){
+  // Cell this fragment belongs to
+  vec2 cellIdx  = floor(gl_FragCoord.xy / uCellSize);
+  vec2 cellCount= floor(uResolution / uCellSize);
+
+  // Sample video at cell centre (mirrored X)
+  vec2 vidUV = vec2(1.0 - (cellIdx.x + 0.5)/cellCount.x,
+                  1.0 - (cellIdx.y + 0.5)/cellCount.y);
+  vec4 vid = texture2D(uVideo, vidUV);
+
+  // Luminance → char index
+  float lum     = dot(vid.rgb, vec3(0.299, 0.587, 0.114));
+  float charIdx = floor((1.0 - lum) * (uCharCount - 1.0));
+
+  // Position inside the cell (0..1)
+  vec2 posInCell = fract(gl_FragCoord.xy / uCellSize);
+  // Atlas UV: chars laid side by side horizontally
+  float atlasX   = (charIdx + posInCell.x) / uCharCount;
+  float atlasY   = posInCell.y;
+  float alpha    = texture2D(uAtlas, vec2(atlasX, atlasY)).r;
+
+  vec3 col = (uColorMode > 0.5) ? vid.rgb : uMonoColor;
+  gl_FragColor = vec4(col * alpha, 1.0);
+}`;
+
+// Compile
+function mkShader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, mkShader(gl.VERTEX_SHADER,   VS));
+gl.attachShader(prog, mkShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog); gl.useProgram(prog);
+
+// Full-screen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog,'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+// Uniform locations
+const uVideo      = gl.getUniformLocation(prog,'uVideo');
+const uAtlas      = gl.getUniformLocation(prog,'uAtlas');
+const uResolution = gl.getUniformLocation(prog,'uResolution');
+const uCellSize   = gl.getUniformLocation(prog,'uCellSize');
+const uCharCount  = gl.getUniformLocation(prog,'uCharCount');
+const uMonoColor  = gl.getUniformLocation(prog,'uMonoColor');
+const uColorMode  = gl.getUniformLocation(prog,'uColorMode');
+
+// ── Textures ─────────────────────────────────────────────────────────
+// Texture unit 0 = video, unit 1 = atlas
+const texVideo = gl.createTexture();
+gl.activeTexture(gl.TEXTURE0);
+gl.bindTexture(gl.TEXTURE_2D, texVideo);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+const texAtlas = gl.createTexture();
+gl.activeTexture(gl.TEXTURE1);
+gl.bindTexture(gl.TEXTURE_2D, texAtlas);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+gl.uniform1i(uVideo, 0);
+gl.uniform1i(uAtlas, 1);
+
+// ── Atlas builder ─────────────────────────────────────────────────────
+function buildAtlas(){
+  const ac = atlasCanvas;
+  const n  = charset.length;
+  ac.width  = n * cellW;
+  ac.height = cellH;
+  const c = ac.getContext('2d');
+  c.clearRect(0,0,ac.width,ac.height);
+  c.fillStyle='black';
+  c.fillRect(0,0,ac.width,ac.height);
+  c.fillStyle='white';
+  c.font = `${Math.round(cellH*0.88)}px "Courier New", monospace`;
+  c.textBaseline='top';
+  c.textAlign='center';
+  for(let i=0;i<n;i++){
+    c.fillText(charset[i], i*cellW + cellW*0.5, cellH*0.05);
+  }
+  // Upload to GPU
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, texAtlas);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, gl.LUMINANCE, gl.UNSIGNED_BYTE, ac);
+  gl.uniform1f(uCharCount, n);
+}
+
+// ── Resize handler ────────────────────────────────────────────────────
+function resize(){
+  const wrap = document.getElementById('wrap');
+  glCanvas.width  = wrap.clientWidth;
+  glCanvas.height = wrap.clientHeight;
+  gl.viewport(0,0,glCanvas.width,glCanvas.height);
+  gl.uniform2f(uResolution, glCanvas.width, glCanvas.height);
+}
+new ResizeObserver(resize).observe(document.getElementById('wrap'));
+
+// ── Control handlers ──────────────────────────────────────────────────
+function onCharsetChange(key){
+  charset = SETS[key];
+  buildAtlas();
+}
+
+function setCellSize(v){
+  cellW = Math.round(v * 0.58);
+  cellH = v;
+  gl.uniform2f(uCellSize, cellW, cellH);
+  buildAtlas(); // rebuild at new size
+}
+
+function setMono(rgb){
+  colorMode = false;
+  monoColor = rgb;
+  gl.uniform3fv(uMonoColor, rgb);
+  gl.uniform1f(uColorMode, 0.0);
+  document.querySelectorAll('.cb').forEach(b=>b.classList.remove('a'));
+  const map = {
+    '0,1,0.25':'b_green', '0.87,0.87,0.87':'b_white', '1,0.67,0':'b_amber'
+  };
+  const key = rgb.join(',');
+  const id = map[key];
+  if(id) document.getElementById(id).classList.add('a');
+}
+
+function setColorMode(){
+  colorMode = true;
+  gl.uniform1f(uColorMode, 1.0);
+  document.querySelectorAll('.cb').forEach(b=>b.classList.remove('a'));
+  document.getElementById('b_color').classList.add('a');
+}
+
+// ── Camera ────────────────────────────────────────────────────────────
+async function startCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:'user', width:{ideal:1280}, height:{ideal:720} }
+    });
+    video.srcObject = stream;
+    await video.play();
+    document.getElementById('ov').style.display='none';
+    document.getElementById('dot').style.background='#ff3b3b';
+    const l=document.getElementById('lbl'); l.textContent='LIVE'; l.classList.add('on');
+
+    // Init uniforms
+    gl.uniform2f(uCellSize, cellW, cellH);
+    gl.uniform3fv(uMonoColor, monoColor);
+    gl.uniform1f(uColorMode, 0.0);
+    resize();
+    buildAtlas();
+
+    running=true;
+    requestAnimationFrame(render);
+  }catch(e){ alert('Camera error: '+e.message); }
+}
+
+// ── Render loop ───────────────────────────────────────────────────────
+function render(ts){
+  if(!running) return;
+
+  // FPS
+  fc++;
+  if(ts-lastT>500){
+    document.getElementById('fps').textContent=Math.round(fc*1000/(ts-lastT))+' FPS';
+    fc=0; lastT=ts;
+  }
+
+  // Upload video frame to GPU texture — this is the ONLY JS work per frame
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texVideo);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+
+  // One draw call — GPU renders everything
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  requestAnimationFrame(render);
+}
+</script>
+</body>
+</html>
