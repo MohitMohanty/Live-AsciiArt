@@ -80,10 +80,10 @@ open main.html
 |---|---|---|
 | Classic terminal look | Full RGB per character | Japanese Katakana chars |
 
-*(attach your screenshots here)*
+
 
 ---
 
 ## 📄 License
 
-MIT — do whatever you want with it.
+ do whatever you want with it.
