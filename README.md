@@ -58,7 +58,7 @@ No installation needed. Just open the HTML file in any modern browser.
 ```bash
 git clone https://github.com/MohitMohanty/Live-AsciiArt
 cd ascii-cam
-open main.html
+open index.html
 ```
 
 > Allow camera access when prompted. Your feed never leaves your device — everything is processed locally in the browser.
