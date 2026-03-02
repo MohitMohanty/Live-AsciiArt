@@ -61,6 +61,8 @@ cd ascii-cam
 open index.html
 ```
 
+https://mohitmohanty.github.io/Live-AsciiArt/
+
 > Allow camera access when prompted. Your feed never leaves your device — everything is processed locally in the browser.
 
 ---
